@@ -1,3 +1,4 @@
+import type { Reporter } from '../../report/reporter.ts';
 import type { ActorSession } from '../../target/session.ts';
 import { fail, inconclusive, pass } from '../result.ts';
 import type { CheckResult } from '../types.ts';
@@ -27,6 +28,13 @@ import { assessAllowOutcome, assessDenyOutcome } from './verdict.ts';
 
 export interface AccessRunContext {
   readonly sessions: ReadonlyMap<string, ActorSession>;
+  /**
+   * Where progress goes. Absent discards it, so no code path has to test whether it was
+   * given one. Threading it here is what lets a run stream progress to something that is
+   * not a terminal, which is why a port declared for tidiness turns out to be load bearing.
+   */
+  readonly reporter?: Reporter;
+
   /**
    * Who persisted state is read as, when a destructive check has to confirm what it did.
    *
@@ -483,6 +491,9 @@ export async function runAccessChecks(
       await reset();
     } catch (cause) {
       resetFailed = cause instanceof Error ? cause.message : 'the reset command failed';
+      context.reporter?.warn(
+        `The reset between mutating access checks did not complete, so the remaining mutating checks are not run: ${resetFailed}`,
+      );
     }
   }
 

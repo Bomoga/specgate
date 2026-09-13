@@ -64,8 +64,18 @@ export async function probe(ctx: ProbeContext, opts: ProbeOptions): Promise<Obse
     // A source root nothing recognized is not a source reading. Counting it as one
     // would report `hybrid` for a run whose source half contributed nothing, and then
     // treat every crawled endpoint as a disagreement with a side that never spoke.
-    if (result.applied.length > 0) source = result.scan;
-    else notes.push(...result.scan.notes);
+    if (result.applied.length > 0) {
+      source = result.scan;
+      opts.reporter?.info(`source read by ${result.applied.join(', ')}`);
+    } else {
+      notes.push(...result.scan.notes);
+      // A configured source root that nothing recognized degrades the run to black box,
+      // and the Observation records that. Saying it here too means a reader finds out
+      // while the probe is running rather than from a note at the end.
+      opts.reporter?.warn(
+        `No source adapter recognized ${sourceRoot}, so this run is black box and no finding can cite a file.`,
+      );
+    }
   } else {
     notes.push({
       level: 'info',

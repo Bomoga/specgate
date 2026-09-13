@@ -5,6 +5,7 @@ import type {
   ObservedEntity,
   ProbeMode,
 } from '../contracts/index.ts';
+import type { Reporter } from '../report/reporter.ts';
 import type { Deps } from '../target/deps.ts';
 
 /**
@@ -42,6 +43,13 @@ export interface SourceAdapter {
 }
 
 export interface ProbeOptions {
+  /**
+   * Where progress goes. Absent discards it, so no code path has to test whether it was
+   * given one. Threading it here is what lets a run stream progress to something that is
+   * not a terminal, which is why a port declared for tidiness turns out to be load bearing.
+   */
+  readonly reporter?: Reporter;
+
   /** Injected clock, per rule R6. An Observation is timestamped and must be reproducible. */
   readonly deps: Deps;
   /** Absent means no source is available and the probe is black box only. */
