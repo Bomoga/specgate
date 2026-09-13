@@ -20,3 +20,5 @@ export {
   roleFor,
 } from './tenancy/roles.ts';
 export type { Capability, Membership, Role } from './tenancy/roles.ts';
+export { TENANT_SETTING, closeDatabase, migrate, withTenant } from './tenancy/db.ts';
+export type { Principal, Sql, TenantContext, Tx } from './tenancy/db.ts';
