@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { observationIdFrom, runIdFrom } from '@specgate/core';
 import {
   fixedDeps,
   isConfigFailure,
@@ -14,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Stream } from '../reporter.ts';
 import { BUILT_IN_DEFAULTS, type Settings } from '../settings.ts';
-import { observationIdFrom, runCheck, runIdFrom } from './check.ts';
+import { runCheck } from './check.ts';
 
 /**
  * The paths through `check` that need no target.

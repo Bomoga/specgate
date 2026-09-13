@@ -124,6 +124,14 @@ export async function runBehavioralChecks(
 
   const gap = capabilityGap(context, capability);
 
+  // Said while it is happening, not only as a reason on each criterion afterwards. A
+  // reader watching a run go by cannot otherwise tell that a whole family was skipped.
+  if (gap !== undefined && fuzzy.length > 0) {
+    context.reporter?.warn(
+      `${fuzzy.length} fuzzy criterion(s) will be reported unverified: ${gap}`,
+    );
+  }
+
   const effective: BehavioralContext =
     capability?.kind === 'available' && context.browser !== undefined
       ? { ...context, browser: { ...context.browser, launcher: capability.launcher } }

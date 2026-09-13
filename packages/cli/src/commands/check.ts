@@ -2,41 +2,22 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 
 import {
-  assembleRun,
-  collectCoverageGaps,
   computeExitCode,
   createEvidenceWriter,
-  createTargetContext,
-  diffSpecObservation,
-  openStore,
+  executeRun,
   isLoadFailure,
-  isRefusal,
-  isTransportError,
+  isRunFatal,
   loadSpec,
-  mutatingChecksAllowed,
-  planAccessChecks,
-  planBehavioralChecks,
-  probe,
+  openStore,
   renderJson,
   renderJunit,
   renderSarif,
   renderText,
-  resetFixtures,
-  resolveBrowserCapability,
-  runAccessChecks,
-  runBehavioralChecks,
   systemDeps,
-  type AccessCheckPlan,
-  type BehavioralPlan,
-  type CapabilityReport,
-  type CheckResultRecord,
-  type Evidence,
-  type EvidenceWriter,
   type Deps,
-  type PruneReport,
   type Reporter,
   type RunResult,
-  type SaveReport,
+  type Store,
   type TargetConfig,
 } from '@specgate/core';
 
@@ -49,33 +30,26 @@ import { DEFAULT_SPEC_GLOB } from './validate.ts';
 /**
  * `specgate check`: the full run, and the only command that produces a RunResult.
  *
- * **Nothing here decides a verdict.** The module says this package contains no
- * verification logic, so every judgment in this file belongs to `core`: `planAccessChecks`
- * and `planBehavioralChecks` decide what can be checked, the runners decide the verdicts,
- * `assembleRun` rolls them up, and `computeExitCode` turns the policy into a number. This
- * function moves data between them and applies the number at the end.
- *
- * **The capability report comes first, before any work.** A run that checks almost
- * nothing and exits zero is the failure mode the report exists for: a reader seeing "no
- * findings" cannot tell that from a clean bill of health unless the tool says what it
- * could not do. Printing it afterwards would be printing it too late to be believed.
+ * **The run itself is not here.** `executeRun` in `core` owns the sequence as of P1, so
+ * that a runner can execute one without reimplementing it. What is left in this file is
+ * what a surface owes a user: turning arguments into an input, opening the things the run
+ * writes through, rendering the result, and applying an exit code it was given.
  *
  * **Exit codes.** 0 and 1 come from `computeExitCode` and are applied without being
- * recomputed. 2 and 3 are this package's, because they describe conditions under which
- * no RunResult exists: an invalid spec or configuration, and a target that could not be
- * reached at all.
+ * recomputed. 2 and 3 describe conditions under which no RunResult exists, and reach here
+ * two ways: an unusable spec or configuration, which this file settles before calling the
+ * run, and a `RunFatalError` the run throws for a target with no base URL or one that
+ * could not be reached at all.
  *
- * **Every run is recorded.** `specgate diff` and `specgate report` read runs out of `.specgate/runs.db`
- * and nothing else puts one there, so a check that did not store its result would leave
- * the sixth step of the success sequence in the product definition unreachable. It is not behind
- * a flag: the command table in the module has no flag for it, and adding one would be a
- * change to the surface.
+ * **Every run is recorded.** `specgate diff` and `specgate report` read runs out of
+ * `.specgate/runs.db` and nothing else puts one there, so a check that did not store its
+ * result would leave the sixth step of the success sequence unreachable. It is not behind
+ * a flag: the command table has no flag for it, and adding one would change the surface.
  *
- * **A store that will not write does not fail the run.** The report is the product and
- * it has already been produced by then; turning a completed run into an error because a
- * database file could not be written would report the wrong thing about the application.
- * It is a warning, and a loud one, because a user who never notices will wonder later
- * why `specgate diff` has nothing to compare.
+ * **A store that will not open does not fail the run.** It is a warning here for the same
+ * reason a store that will not write is a warning inside the run: the report is the
+ * product, and turning a completed run into an error because a database file could not be
+ * written would report the wrong thing about the application.
  */
 
 export interface CheckOptions {
@@ -97,146 +71,6 @@ export interface CheckOptions {
   readonly deps?: Deps;
 }
 
-/** `RUN-20260818-180338`, derived from the injected clock rather than read from one. */
-export function runIdFrom(instant: string): string {
-  return `RUN-${stamp(instant)}`;
-}
-
-/** The run's Observation, named off the same instant so the pair reads as one run. */
-export function observationIdFrom(instant: string): string {
-  return `OBS-${stamp(instant)}`;
-}
-
-/**
- * `20260818-180338` from an ISO instant: date, then hours, minutes, and seconds.
- *
- * Seconds are in it because the store keys runs by id and refuses a duplicate rather than
- * overwriting one. At minute resolution two runs a few seconds apart collided, which is
- * exactly what happens when somebody checks, fixes something, and checks again, and is
- * also what the S7 exit criterion does on purpose.
- */
-function stamp(instant: string): string {
-  const digits = instant.replace(/\D/g, '');
-  return `${digits.slice(0, 8)}-${digits.slice(8, 14)}`;
-}
-
-/**
- * The capability report, said out loud at the start.
- *
- * `createTargetContext` already phrases every gap as what will not be checked, and the
- * contract calls those lines something a surface prints verbatim, so they are printed
- * verbatim. The available half is stated too: a reader seeing only warnings cannot tell
- * a clean setup from an unreported gap.
- */
-function reportCapabilities(
-  capabilities: CapabilityReport,
-  browserAvailable: boolean,
-  reporter: Reporter,
-): void {
-  reporter.step('Capabilities');
-  reporter.info(`target: ${capabilities.baseUrl ?? 'not configured'}`);
-  reporter.info(
-    `source: ${
-      capabilities.sourceRoot === undefined
-        ? 'not configured'
-        : `${capabilities.sourceRoot}${capabilities.sourcePresent ? '' : ' (missing)'}`
-    }`,
-  );
-  reporter.info(
-    capabilities.actorIds.length === 0
-      ? 'actors: none resolved'
-      : `actors: ${capabilities.actorIds.join(', ')}`,
-  );
-  reporter.info(`fixtures: ${capabilities.fixturesAvailable ? 'available' : 'refused'}`);
-  reporter.info(`browser: ${browserAvailable ? 'available' : 'not installed'}`);
-
-  for (const warning of capabilities.warnings) reporter.warn(warning);
-
-  if (!browserAvailable) {
-    reporter.warn(
-      'Playwright is not installed, so any criterion with mode fuzzy will be reported unverified with reason capability-unavailable. Install playwright to enable it.',
-    );
-  }
-}
-
-/**
- * The real writer, plus a list of what it wrote.
- *
- * The Evidence records exist inside the session layer and reach a CheckResult as ids
- * only, so this is how the command gets the records themselves without changing a
- * signature owned by M3 or M5. `createTargetContext` already takes a writer, so nothing
- * new had to be invented for it.
- */
-function recordingWriter(cwd: string, into: Evidence[]): EvidenceWriter {
-  const real = createEvidenceWriter({ cwd });
-  return {
-    write(capture) {
-      real.write(capture);
-      into.push(capture.evidence);
-    },
-  };
-}
-
-/** What retention removed, or nothing at all when it removed nothing. */
-function describePrune(report: PruneReport): string | undefined {
-  const { runsRemoved, evidenceRemoved, bodiesDeleted } = report;
-  if (runsRemoved.length === 0 && evidenceRemoved.length === 0) return undefined;
-
-  const parts = [
-    `kept the last ${report.policy.keepRuns} run(s) and the evidence for ${report.policy.keepEvidence}`,
-  ];
-
-  if (runsRemoved.length > 0) parts.push(`removed ${runsRemoved.join(', ')}`);
-  if (evidenceRemoved.length > 0) {
-    parts.push(
-      `dropped ${evidenceRemoved.length} evidence record(s) and ${bodiesDeleted.length} body file(s)`,
-    );
-  }
-
-  return `retention: ${parts.join('; ')}`;
-}
-
-/**
- * Records the run, and says what that cost. Never throws: see the note at the top.
- */
-function store(
-  cwd: string,
-  result: RunResult,
-  evidence: readonly Evidence[],
-  reporter: Reporter,
-): void {
-  let saved: SaveReport;
-  // The open is inside the guard as well as the write. A database written by a newer
-  // build is refused rather than opened, and that refusal must not take a finished run
-  // with it.
-  let opened: ReturnType<typeof openStore> | undefined;
-
-  try {
-    opened = openStore(cwd);
-    saved = opened.saveRun(result, evidence);
-  } catch (error) {
-    reporter.warn(
-      `the run was not recorded, so "specgate diff" and "specgate report" will not see it: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return;
-  } finally {
-    opened?.close();
-  }
-
-  reporter.info(`recorded ${saved.runId} with ${saved.evidenceRecorded} evidence record(s)`);
-
-  if (saved.bodiesMissing.length > 0) {
-    reporter.warn(
-      `${saved.bodiesMissing.length} evidence record(s) name a body file that is not on disk: ${saved.bodiesMissing.join(', ')}`,
-    );
-  }
-
-  // Pruning is reported rather than done silently, which is the module's rule and the
-  // reason the store hands the report back with the save.
-  const pruned = describePrune(saved.pruned);
-  if (pruned !== undefined) reporter.info(pruned);
-}
-
 function render(result: RunResult, format: Settings['format']['value'], color: boolean): string {
   if (format === 'json') return renderJson(result);
   if (format === 'sarif') return renderSarif(result);
@@ -245,6 +79,23 @@ function render(result: RunResult, format: Settings['format']['value'], color: b
   // text report is a projection of a RunResult again and `specgate report` renders the same
   // section from a stored run.
   return renderText(result, { color });
+}
+
+/**
+ * Opens the run store, or says why it could not and carries on without one.
+ *
+ * The open is guarded as well as the write. A database written by a newer build is
+ * refused rather than opened, and that refusal must not take a finished run with it.
+ */
+function openStoreOrWarn(cwd: string, reporter: Reporter): Store | undefined {
+  try {
+    return openStore(cwd);
+  } catch (error) {
+    reporter.warn(
+      `the run was not recorded, so "specgate diff" and "specgate report" will not see it: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
 }
 
 export async function runCheck(options: CheckOptions): Promise<number> {
@@ -289,167 +140,40 @@ export async function runCheck(options: CheckOptions): Promise<number> {
     );
   }
 
-  const startedAt = deps.now();
-  const evidence: Evidence[] = [];
-  const target = createTargetContext(config, loaded.spec, {
-    env,
-    deps,
-    cwd,
-    writer: recordingWriter(cwd, evidence),
-  });
-  const browser = await resolveBrowserCapability();
-  reportCapabilities(target.capabilities, browser.kind === 'available', reporter);
+  const store = openStoreOrWarn(cwd, reporter);
 
-  const baseUrl = config.target.baseUrl;
-  if (baseUrl === undefined) {
-    return present(
+  let result: RunResult;
+  try {
+    result = await executeRun(
+      { spec: loaded, config, env, cwd, toolVersion: CLI_VERSION },
       {
-        code: 2,
-        summary: 'the target has no base URL',
-        where: `${options.configPath}, at target.baseUrl`,
-        reason: 'A check issues requests, so it needs somewhere to send them.',
-        suggestion: 'Set target.baseUrl in the config, for example http://localhost:3000.',
+        evidence: createEvidenceWriter({ cwd }),
+        reporter,
+        deps,
+        ...(store === undefined ? {} : { store }),
       },
-      presentTo,
     );
-  }
-
-  // One request before anything else, so an unreachable target is reported as one rather
-  // than as a report full of inconclusive checks. Exit 3 with the URL and the reason.
-  reporter.step(`Reaching ${baseUrl}`);
-  // Unauthenticated on purpose. Whether the root answers 200 or 401 is a fact about the
-  // application; whether anything answered at all is the fact this is asking for.
-  const reachability = await target.client.send({ method: 'GET', path: '/' }, { kind: 'none' });
-  if (isTransportError(reachability)) {
-    // Exit 3: the target is unreachable, so no run happened at all.
-    return present(
-      {
-        code: 3,
-        summary: 'could not reach the target',
-        where: baseUrl,
-        reason: reachability.message,
-        suggestion: 'Start the application, or correct target.baseUrl in the config.',
-      },
-      presentTo,
-    );
-  }
-
-  reporter.step('Probing the target');
-  // The source root travels with the base URL. Without it the probe is black box on
-  // every run whatever the config said, so no endpoint carries a handler reference and
-  // no finding can cite a file.
-  const sourceRoot = config.target.sourceRoot;
-  const observation = await probe(
-    {
-      config: { target: { baseUrl, ...(sourceRoot === undefined ? {} : { sourceRoot }) } },
-      sessions: target.sessions,
-    },
-    { deps, baseUrl, cwd },
-  );
-  reporter.info(
-    `${observation.endpoints.length} endpoint(s) and ${observation.entities.length} entity(ies) observed`,
-  );
-
-  const planning = {
-    actorIds: new Set(target.sessions.keys()),
-    resources: config.resources,
-  };
-
-  reporter.step('Planning checks');
-  const access = planAccessChecks(loaded.spec, loaded.conditions, observation, planning);
-  const behavioral = planBehavioralChecks(loaded.spec, observation, planning);
-  reporter.info(
-    `${access.plans.length} access check(s) and ${behavioral.plans.length} behavioral check(s) planned`,
-  );
-
-  reporter.step('Running checks');
-  /**
-   * The reset the disposability gate permits, finally wired up.
-   *
-   * M3.7 built the interlock and gave the runner a `reset` to call between mutating
-   * checks, and no caller ever supplied one, so no real run has ever reset anything. The
-   * corpus paid for it: on one application a destructive access check deleted the record,
-   * and the criterion that would have caught the same defect reported that nothing could
-   * change; on another a later anonymous delete passed with a 404 because the record was
-   * already gone.
-   *
-   * A reset that fails is reported rather than swallowed. `runAccessChecks` already stops
-   * the remaining mutating checks when one fails, and between the families the honest
-   * thing is to say so out loud, because everything after it ran against a state nobody
-   * established.
-   */
-  const canMutate = mutatingChecksAllowed(config);
-  const reset = canMutate
-    ? async (): Promise<void> => {
-        const outcome = await resetFixtures(config, { cwd });
-        if (isRefusal(outcome)) throw new Error(outcome.message);
-        if (outcome.exitCode !== 0) {
-          throw new Error(`the reset command exited ${outcome.exitCode}`);
-        }
-      }
-    : undefined;
-
-  const accessResults = await runAccessChecks(access.plans as AccessCheckPlan[], {
-    sessions: target.sessions,
-    mutation: { allowed: canMutate, ...(reset === undefined ? {} : { reset }) },
-    // A denied delete that succeeds and returns nothing is settled by reading the record,
-    // never as the actor the rule says must be refused.
-    ...(config.stateActor === undefined ? {} : { stateActorId: config.stateActor }),
-  });
-
-  // Between the families, not only within one. An access check that deleted a record
-  // changes what every criterion after it can observe.
-  if (reset !== undefined && access.plans.some((plan) => plan.mutates)) {
-    try {
-      await reset();
-    } catch (cause) {
-      reporter.warn(
-        `The reset between the access checks and the acceptance criteria did not complete, so every criterion below ran against a state this run did not establish: ${
-          cause instanceof Error ? cause.message : 'the reset command failed'
-        }`,
+  } catch (error) {
+    // The two conditions under which no RunResult exists. The run decided the code and
+    // the wording; this turns them into output, which is the half `core` does not do.
+    if (isRunFatal(error)) {
+      return present(
+        {
+          code: error.code,
+          summary: error.message,
+          // A config key reaches here without a file in front of it, because the run does
+          // not know which file the config came from and this does.
+          where: error.code === 2 ? `${options.configPath}, at ${error.where}` : error.where,
+          ...(error.reason === undefined ? {} : { reason: error.reason }),
+          ...(error.suggestion === undefined ? {} : { suggestion: error.suggestion }),
+        },
+        presentTo,
       );
     }
+    throw error;
+  } finally {
+    store?.close();
   }
-
-  const { results: behavioralResults, unverified } = await runBehavioralChecks(
-    behavioral.plans as BehavioralPlan[],
-    {
-      sessions: target.sessions,
-      ...(config.stateActor === undefined ? {} : { stateActorId: config.stateActor }),
-      browser: { baseUrl },
-      ...(mutatingChecksAllowed(config)
-        ? { mutation: { allowed: true } }
-        : { mutation: { allowed: false, reason: 'the target is not marked disposable' } }),
-    },
-  );
-
-  const result = assembleRun({
-    runId: runIdFrom(startedAt),
-    toolVersion: CLI_VERSION,
-    startedAt,
-    finishedAt: deps.now(),
-    spec: loaded.spec,
-    specHash: loaded.hash,
-    specFiles: loaded.files,
-    observationRef: observationIdFrom(startedAt),
-    observation,
-    target: {
-      baseUrl,
-      ...(config.target.sourceRoot === undefined ? {} : { sourceRoot: config.target.sourceRoot }),
-    },
-    checks: [...accessResults, ...behavioralResults] as CheckResultRecord[],
-    structural: diffSpecObservation(loaded.spec, observation, config.resources),
-    // Three side channels through one collector, so a caller that remembered two cannot
-    // silently drop the third.
-    gaps: collectCoverageGaps({
-      accessUnplannable: access.unplannable,
-      behavioralUnplannable: behavioral.unplannable,
-      behavioralUnverified: unverified,
-    }),
-  });
-
-  reporter.step('Recording the run');
-  store(cwd, result, evidence, reporter);
 
   const document = render(result, settings.format.value, options.color === true);
   const outPath = settings.out.value;

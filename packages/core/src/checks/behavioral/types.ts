@@ -1,3 +1,4 @@
+import type { Reporter } from '../../report/reporter.ts';
 import type { CriterionMode } from '../../contracts/index.ts';
 import type { PageCaptureOptions } from './browser.ts';
 import type { Judge } from './judge.ts';
@@ -98,6 +99,13 @@ export interface FuzzyBrowserContext {
 
 export interface BehavioralContext {
   readonly sessions: ReadonlyMap<string, ActorSession>;
+  /**
+   * Where progress goes. Absent discards it, so no code path has to test whether it was
+   * given one. Threading it here is what lets a run stream progress to something that is
+   * not a terminal, which is why a port declared for tidiness turns out to be load bearing.
+   */
+  readonly reporter?: Reporter;
+
   /** Absent means fuzzy criteria report unverified rather than failing the run. */
   readonly browser?: FuzzyBrowserContext;
   /**
