@@ -19,3 +19,4 @@ export * from './probe/index.ts';
 export * from './diff/index.ts';
 export * from './report/index.ts';
 export * from './store/index.ts';
+export * from './run/index.ts';
