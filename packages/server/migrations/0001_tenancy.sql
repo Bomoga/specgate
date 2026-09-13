@@ -4,15 +4,21 @@
 -- A product whose premise is that generated code silently omits authorization checks cannot
 -- have its own isolation depend on the application layer being perfect.
 --
--- Two details here decide whether the isolation is real, and both are easy to get wrong in a
--- way that makes the tenancy test pass for the wrong reason:
+-- Three details here decide whether the isolation is real, and all three fail quietly in a
+-- way that makes the tenancy test pass for the wrong reason. The third was found by the
+-- first CI run of this file, which returned rows from both organizations to a session with
+-- no tenant context at all:
 --
 --   1. FORCE ROW LEVEL SECURITY. Plain ENABLE does not apply to the table owner, and in both
 --      the compose service and the CI service container the application user owns these
 --      tables. Without FORCE every policy below is inert and every query returns everything,
 --      while a test that only ever connects as the owner reports success.
 --
---   2. current_setting without the missing_ok argument. The two argument form returns NULL
+--   2. The connecting role must not be a superuser. See the note at the foot of this file.
+--      FORCE covers the table owner and does nothing about BYPASSRLS, which superusers hold
+--      implicitly, so this is a separate hole rather than the same one.
+--
+--   3. current_setting without the missing_ok argument. The two argument form returns NULL
 --      when the variable is unset, which would make the predicate NULL and quietly return
 --      zero rows. Zero rows is a safe answer but it is not the one the module asks for: a
 --      query with no tenant context must error rather than look like an empty organization.
@@ -96,3 +102,33 @@ ALTER TABLE activity FORCE ROW LEVEL SECURITY;
 CREATE POLICY activity_tenant ON activity
   USING (organization_id = current_setting('specgate.organization_id'))
   WITH CHECK (organization_id = current_setting('specgate.organization_id'));
+
+-- The application role, and the reason this file has one.
+--
+-- FORCE ROW LEVEL SECURITY makes policies apply to the table owner. It does nothing about
+-- BYPASSRLS, which every superuser has implicitly, and the official Postgres image creates
+-- POSTGRES_USER as a superuser. Connecting as that user meant every policy above was inert:
+-- the first CI run returned rows from both organizations to a session with no tenant context
+-- at all, which is exactly the leak invariant I9 exists to make impossible.
+--
+-- So requests connect as a role that is not a superuser and does not own these tables.
+-- Migrations keep the privileged connection, which is the split the module already asks for
+-- when it says migrations run as a privileged role outside request handling.
+--
+-- The password is local only. This role exists in a compose service and a CI service
+-- container and nowhere else, and a real deployment provisions its own.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'specgate_app') THEN
+    CREATE ROLE specgate_app LOGIN PASSWORD 'specgate_app';
+  END IF;
+END
+$$;
+
+-- Explicit rather than relying on the defaults, because the whole failure above was a
+-- default nobody had looked at.
+ALTER ROLE specgate_app NOSUPERUSER NOBYPASSRLS;
+
+GRANT USAGE ON SCHEMA public TO specgate_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO specgate_app;

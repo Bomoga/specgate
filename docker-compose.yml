@@ -11,6 +11,13 @@
 #   docker compose up -d
 #   docker compose down -v
 #
+# Two connection strings, because a superuser bypasses row level security outright and the
+# image creates POSTGRES_USER as one. Migrations use the first, requests use the second, and
+# the migration creates that second role:
+#
+#   DATABASE_URL=postgres://specgate:specgate@127.0.0.1:5433/specgate_test
+#   DATABASE_APP_URL=postgres://specgate_app:specgate_app@127.0.0.1:5433/specgate_test
+#
 # The credentials are local only and deliberately boring. Nothing here is a secret, and
 # nothing that is a secret ever belongs in this file.
 

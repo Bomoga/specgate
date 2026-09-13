@@ -95,4 +95,8 @@ jobs:
       - name: Tenancy
         run: pnpm --filter @specgate/server exec vitest run
         env:
+          # Two roles on purpose. DATABASE_URL owns the schema and runs migrations.
+          # DATABASE_APP_URL is the unprivileged role requests use, because a superuser
+          # bypasses row level security outright and the image's configured user is one.
           DATABASE_URL: postgres://specgate:specgate@127.0.0.1:5433/specgate_test
+          DATABASE_APP_URL: postgres://specgate_app:specgate_app@127.0.0.1:5433/specgate_test

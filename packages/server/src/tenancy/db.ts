@@ -50,33 +50,57 @@ export const TENANT_SETTING = 'specgate.organization_id';
 export type Sql = postgres.Sql;
 export type Tx = postgres.TransactionSql;
 
-let client: Sql | undefined;
+let appClient: Sql | undefined;
+let adminClient: Sql | undefined;
 
-/**
- * The connection, made once.
- *
- * Module private on purpose. Exporting it would be exporting the unscoped accessor this
- * design exists to not have.
- */
-function connection(): Sql {
-  if (client !== undefined) return client;
-
-  const url = process.env['DATABASE_URL'];
+function open(variable: string, hint: string): Sql {
+  const url = process.env[variable];
   if (url === undefined || url === '') {
     throw new Error(
-      'DATABASE_URL is not set. Bring a database up with "docker compose up -d" from the repository root, or let CI provide its service container.',
+      `${variable} is not set. ${hint} Bring a database up with "docker compose up -d" from the repository root, or let CI provide its service container.`,
     );
   }
-
-  client = postgres(url, { max: 8, onnotice: () => {} });
-  return client;
+  return postgres(url, { max: 8, onnotice: () => {} });
 }
 
-/** Closes the pool. For a test teardown or a shutdown, never for a request. */
+/**
+ * The connection requests use, as an unprivileged role.
+ *
+ * **This is separate from the migration connection for one reason, and it is not tidiness.**
+ * Row level security is bypassed outright by any role holding BYPASSRLS, which every
+ * superuser has implicitly, and the official Postgres image creates its configured user as a
+ * superuser. The first CI run of this schema connected that way and a session with no tenant
+ * context read rows from both organizations. FORCE ROW LEVEL SECURITY does not help: it
+ * covers the table owner and says nothing about BYPASSRLS.
+ *
+ * So requests connect as `specgate_app`, created by the migration as NOSUPERUSER NOBYPASSRLS
+ * and owning nothing. Module private, because exporting it would be exporting the unscoped
+ * accessor this design exists to not have.
+ */
+function connection(): Sql {
+  appClient ??= open(
+    'DATABASE_APP_URL',
+    'Requests connect as the unprivileged specgate_app role, never as the database owner.',
+  );
+  return appClient;
+}
+
+/**
+ * The privileged connection, for migrations only.
+ *
+ * The carve out the module names when it says migrations run as a privileged role outside
+ * request handling. Nothing in a handler reaches this.
+ */
+function adminConnection(): Sql {
+  adminClient ??= open('DATABASE_URL', 'Migrations need the owning role.');
+  return adminClient;
+}
+
+/** Closes both pools. For a test teardown or a shutdown, never for a request. */
 export async function closeDatabase(): Promise<void> {
-  if (client === undefined) return;
-  await client.end({ timeout: 5 });
-  client = undefined;
+  await Promise.all([appClient?.end({ timeout: 5 }), adminClient?.end({ timeout: 5 })]);
+  appClient = undefined;
+  adminClient = undefined;
 }
 
 /**
@@ -108,7 +132,7 @@ export async function migrate(): Promise<readonly string[]> {
     .filter((name) => name.endsWith('.sql'))
     .sort();
 
-  const sql = connection();
+  const sql = adminConnection();
   for (const name of files) {
     await sql.unsafe(readFileSync(join(dir, name), 'utf8'));
   }
@@ -117,6 +141,6 @@ export async function migrate(): Promise<readonly string[]> {
 
 /** Drops everything this schema owns. Test teardown only. */
 export async function resetSchema(): Promise<void> {
-  const sql = connection();
+  const sql = adminConnection();
   await sql.unsafe('drop schema public cascade; create schema public;');
 }

@@ -113,6 +113,39 @@ describe('every tenant scoped table is protected by the database', () => {
   });
 });
 
+describe('the role requests connect as', () => {
+  it('is neither a superuser nor able to bypass row level security', async () => {
+    // The guard on the hole that made the first CI run of this schema return rows from both
+    // organizations to a session with no tenant context. FORCE ROW LEVEL SECURITY covers
+    // the table owner and says nothing about BYPASSRLS, which every superuser holds
+    // implicitly. Asserting the privilege directly means a future change that connects as
+    // the owner again fails here rather than silently disabling every policy.
+    const rows = await withTenant(asA, async (tx) => {
+      return tx<{ rolsuper: boolean; rolbypassrls: boolean; current_user: string }[]>`
+        select r.rolsuper, r.rolbypassrls, current_user
+        from pg_roles r where r.rolname = current_user
+      `;
+    });
+
+    expect(rows[0]?.current_user).toBe('specgate_app');
+    expect(rows[0]?.rolsuper, 'the request role is not a superuser').toBe(false);
+    expect(rows[0]?.rolbypassrls, 'the request role cannot bypass row level security').toBe(false);
+  });
+
+  it('does not own the tables it queries', async () => {
+    // Ownership plus FORCE would still be enforced, but not owning them means one fewer
+    // way for a policy to be bypassed by accident.
+    const rows = await withTenant(asA, async (tx) => {
+      return tx<{ tableowner: string }[]>`
+        select tableowner from pg_tables where schemaname = 'public'
+      `;
+    });
+    for (const row of rows) {
+      expect(row.tableowner).not.toBe('specgate_app');
+    }
+  });
+});
+
 describe('one organization cannot see another', () => {
   it('reads zero rows of B from every tenant scoped table while scoped to A', async () => {
     // The stage exit criterion, and deliberately a SELECT with no organization predicate:
@@ -168,8 +201,10 @@ describe('a query with no tenant context', () => {
     // Opened raw on purpose. The product exports no unscoped accessor, which is the point
     // of the design, so proving what happens without one requires the test to make its own
     // connection rather than the module offering a way in.
-    const url = process.env['DATABASE_URL'];
-    expect(url, 'DATABASE_URL is set for this suite').toBeDefined();
+    // The app role, not the owner. Connecting as the owner is what made the first run of
+    // this suite pass a query that should have been impossible.
+    const url = process.env['DATABASE_APP_URL'];
+    expect(url, 'DATABASE_APP_URL is set for this suite').toBeDefined();
     const raw = postgres(url as string, { max: 1, onnotice: () => {} });
 
     try {
