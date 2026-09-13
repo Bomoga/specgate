@@ -1,0 +1,40 @@
+# Local Postgres for the control plane's tests.
+#
+# Rule R9, as amended by A7, permits a test to depend on a service this repository itself
+# starts and owns. This is that service. A test that needed a host this repository does not
+# start would be deleted rather than skipped.
+#
+# The tenant boundary is a row level security policy, which is a Postgres feature. It cannot
+# be simulated in SQLite and a mock of it asserts nothing, so invariant I9 is only provable
+# against a real database. That is why this file exists rather than a fake.
+#
+#   docker compose up -d
+#   docker compose down -v
+#
+# The credentials are local only and deliberately boring. Nothing here is a secret, and
+# nothing that is a secret ever belongs in this file.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: specgate-postgres
+    environment:
+      POSTGRES_USER: specgate
+      POSTGRES_PASSWORD: specgate
+      POSTGRES_DB: specgate_test
+    ports:
+      # 5433 rather than 5432, so a Postgres somebody already runs is not shadowed and a
+      # test cannot silently connect to it and write to the wrong database.
+      - '5433:5432'
+    healthcheck:
+      # The tests wait on this rather than on a sleep, because a container that is up is not
+      # the same fact as a database that will accept a connection.
+      test: ['CMD-SHELL', 'pg_isready -U specgate -d specgate_test']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    tmpfs:
+      # No volume. Every run starts from an empty database, which is what makes the tenancy
+      # test answerable: rows left behind by a previous run would make "zero rows from the
+      # other organization" pass for the wrong reason.
+      - /var/lib/postgresql/data
