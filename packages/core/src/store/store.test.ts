@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Evidence, RunResult } from '../contracts/index.ts';
 import { DEFAULT_LIST_LIMIT, openStore, type Store } from './store.ts';
+import { DEFAULT_EVIDENCE_DIR } from '../evidence/capture.ts';
+import { addressOf, resolveBodyPath } from '../evidence/address.ts';
 
 /**
  * A real SQLite file in a temp directory, and real body files beside it, because half of
@@ -66,7 +68,12 @@ function run(overrides: Partial<RunResult> = {}): RunResult {
   } as RunResult;
 }
 
-function evidence(id = 'EV-1', bodyRef = '.specgate/evidence/EV-1.json'): Evidence {
+/** A content address, per D51. Derived from a seed so a test can name one twice. */
+function addressFor(seed: string): string {
+  return addressOf(seed);
+}
+
+function evidence(id = 'EV-1', bodyRef = addressFor('EV-1')): Evidence {
   return {
     id,
     kind: 'http',
@@ -80,7 +87,7 @@ function evidence(id = 'EV-1', bodyRef = '.specgate/evidence/EV-1.json'): Eviden
 
 /** Puts a body where the capture writer would have. */
 function writeBody(bodyRef: string): void {
-  const target = join(dir, bodyRef);
+  const target = resolveBodyPath(bodyRef, { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR });
   mkdirSync(join(target, '..'), { recursive: true });
   writeFileSync(target, '{"request":{},"response":{}}\n', 'utf8');
 }
@@ -101,7 +108,7 @@ describe('saving a run', () => {
 
   it('records every evidence record it was given', () => {
     const store = open();
-    writeBody('.specgate/evidence/EV-1.json');
+    writeBody(addressFor('EV-1'));
 
     const report = store.saveRun(run(), [evidence()]);
 
@@ -112,7 +119,7 @@ describe('saving a run', () => {
   it('reports a body that is not on disk rather than implying one exists', () => {
     // A run assembled without an evidence writer is legitimate, and so is one whose
     // bodies were pruned. Claiming the body is there is what would not be.
-    const report = open().saveRun(run(), [evidence('EV-1', '.specgate/evidence/EV-1.json')]);
+    const report = open().saveRun(run(), [evidence('EV-1', addressFor('EV-1'))]);
 
     expect(report.evidenceRecorded).toBe(1);
     expect(report.bodiesMissing).toStrictEqual(['EV-1']);
@@ -122,7 +129,7 @@ describe('saving a run', () => {
     // The writer in M2 already wrote it, redacted, at capture time. A store that
     // re-serialized a body it never read would be inventing content, against rule R8.
     const store = open();
-    store.saveRun(run(), [evidence('EV-1', '.specgate/evidence/EV-1.json')]);
+    store.saveRun(run(), [evidence('EV-1', addressFor('EV-1'))]);
 
     // Still missing after the save, because saving is not writing.
     expect(

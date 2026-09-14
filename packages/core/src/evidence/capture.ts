@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import type { Evidence } from '../contracts/index.ts';
 import type { Deps } from '../target/deps.ts';
 import type { RequestOutcome, RequestSpec } from '../target/request.ts';
+import { addressOf, resolveBodyPath, serializeBodyDocument } from './address.ts';
 import { redactBody, redactHeaders, type RedactionRules } from './redact.ts';
 
 /**
@@ -64,7 +65,6 @@ export function captureHttpEvidence(
   options: CaptureOptions = {},
 ): CapturedEvidence {
   const id = evidenceId(deps);
-  const dir = options.evidenceDir ?? DEFAULT_EVIDENCE_DIR;
 
   const requestHeaders = redactHeaders(spec.headers ?? {}, rules, 'request.headers');
   const requestBody =
@@ -116,7 +116,8 @@ export function captureHttpEvidence(
       response: {
         status: response.status,
         headers: responseHeaders.value,
-        bodyRef: `${dir}/${id}.json`,
+        // A content address of the document below, per D51. Opaque to every consumer.
+        bodyRef: addressOf(serializeBodyDocument(document)),
         truncated: response.truncated,
       },
       redactions: allRedactions,
@@ -132,10 +133,13 @@ export function createEvidenceWriter(options: CaptureOptions = {}): EvidenceWrit
 
   return {
     write(capture) {
-      const bodyRef = capture.evidence.response?.bodyRef ?? `${dir}/${capture.evidence.id}.json`;
-      const target = join(cwd, bodyRef);
+      const serialized = serializeBodyDocument(capture.document);
+      // A transport error carries no response and so no reference, and its request is still
+      // worth keeping on disk. Addressing it the same way costs nothing and means one rule.
+      const bodyRef = capture.evidence.response?.bodyRef ?? addressOf(serialized);
+      const target = resolveBodyPath(bodyRef, { cwd, evidenceDir: dir });
       mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, `${JSON.stringify(capture.document, null, 2)}\n`, 'utf8');
+      writeFileSync(target, serialized, 'utf8');
 
       const recordTarget = join(cwd, dir, `${capture.evidence.id}.record.json`);
       writeFileSync(recordTarget, `${JSON.stringify(capture.evidence, null, 2)}\n`, 'utf8');

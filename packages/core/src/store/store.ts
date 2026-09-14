@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import {
   EvidenceSchema,
@@ -9,6 +9,8 @@ import {
   type Summary,
 } from '../contracts/index.ts';
 import { pruneStore, resolvePrunePolicy, type PrunePolicy, type PruneReport } from './prune.ts';
+import { DEFAULT_EVIDENCE_DIR } from '../evidence/capture.ts';
+import { isBodyAddress, resolveBodyPath } from '../evidence/address.ts';
 import { openDatabase, type StoreDatabase } from './schema.ts';
 
 /**
@@ -127,8 +129,13 @@ function parseRun(row: Pick<RunRow, 'run_id' | 'result_json'>): RunResult {
 
 /** `.specgate/evidence/EV-1.json` is relative to the project, not to the state directory. */
 function bodyExists(projectDir: string, bodyRef: string | undefined): boolean {
-  if (bodyRef === undefined) return false;
-  return existsSync(isAbsolute(bodyRef) ? bodyRef : resolve(projectDir, bodyRef));
+  // A reference that is not a content address was written before P1.6 and names a path this
+  // build no longer produces. Reporting it missing is the honest answer and is already a
+  // case `saveRun` surfaces, rather than a resolution that cannot succeed.
+  if (bodyRef === undefined || !isBodyAddress(bodyRef)) return false;
+  return existsSync(
+    resolveBodyPath(bodyRef, { cwd: projectDir, evidenceDir: DEFAULT_EVIDENCE_DIR }),
+  );
 }
 
 export function openStore(dir: string, options: StoreOptions = {}): Store {

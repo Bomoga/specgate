@@ -7,3 +7,10 @@
  */
 export * from './redact.ts';
 export * from './capture.ts';
+export {
+  addressOf,
+  bodyFileName,
+  isBodyAddress,
+  resolveBodyPath,
+  serializeBodyDocument,
+} from './address.ts';
