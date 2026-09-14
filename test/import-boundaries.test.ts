@@ -5,6 +5,7 @@ import {
   CHECKS_FORBIDDEN_PATTERNS,
   CLI_FORBIDDEN_PATTERNS,
   CORE_FORBIDDEN_PATTERNS,
+  SERVER_FORBIDDEN_PATTERNS,
   LLM_BOUNDARY_DIR,
   LLM_BOUNDARY_RULE,
   LLM_CLIENT_PATTERNS,
@@ -116,5 +117,51 @@ describe('the package dependency direction', () => {
   it('leaves action free to import cli', async () => {
     const action = await forbiddenSpecifiersFor('packages/action/src/index.ts');
     expect(action).not.toContain('@specgate/cli');
+  });
+});
+
+/**
+ * Rule R14, asserted the same way R1 is: against the config ESLint actually resolves for
+ * a path, so a reordering that silently drops the rule fails here rather than in review.
+ *
+ * This is the boundary the architecture singles out as the one to defend. `packages/server`
+ * does not exist yet, and the assertion does not need it to: `calculateConfigForFile`
+ * answers for a path, and the rule has to be in place before the first file is written or
+ * it will be added after the first import that violates it.
+ */
+describe('the plane boundary, rule R14', () => {
+  it('stops server importing core, cli, or action', async () => {
+    const server = await forbiddenSpecifiersFor('packages/server/src/index.ts');
+    for (const pattern of SERVER_FORBIDDEN_PATTERNS) {
+      expect(server).toContain(pattern);
+    }
+  });
+
+  it('stops core importing server, web, client, or runner', async () => {
+    // The existing rule extended. It is what keeps the engine embeddable and the CLI
+    // usable with no control plane at all, per D30 and D34.
+    const core = await forbiddenSpecifiersFor('packages/core/src/index.ts');
+    for (const pattern of [
+      '@specgate/server',
+      '@specgate/web',
+      '@specgate/client',
+      '@specgate/runner',
+    ]) {
+      expect(core).toContain(pattern);
+    }
+  });
+
+  it('leaves server free to import contracts, which is how a run reaches it', async () => {
+    // Everything the control plane understands about a run arrives as data validated
+    // against `contracts`. Forbidding that too would leave it no legitimate route.
+    const server = await forbiddenSpecifiersFor('packages/server/src/index.ts');
+    expect(server).not.toContain('@specgate/contracts');
+  });
+
+  it('keeps the model boundary on server as well', async () => {
+    // The control plane has no verdict path, and the cheapest way to keep it that way is
+    // for a model client to be unimportable there in the first place.
+    const server = await forbiddenSpecifiersFor('packages/server/src/index.ts');
+    expect(server).toContain('@anthropic-ai/*');
   });
 });

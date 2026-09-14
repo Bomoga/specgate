@@ -42,8 +42,37 @@ export const CORE_FORBIDDEN_PATTERNS = [
   '@specgate/cli/*',
   '@specgate/action',
   '@specgate/action/*',
+  '@specgate/server',
+  '@specgate/server/*',
+  '@specgate/web',
+  '@specgate/web/*',
+  '@specgate/client',
+  '@specgate/client/*',
+  '@specgate/runner',
+  '@specgate/runner/*',
 ];
 export const CLI_FORBIDDEN_PATTERNS = ['@specgate/action', '@specgate/action/*'];
+
+/**
+ * Hard rule R14, and the one boundary rule most likely to be waved through in review.
+ *
+ * The control plane must never be able to run a check, because a code path that can is a
+ * code path that will eventually be asked to. Everything the server needs to understand
+ * about a run arrives as data validated against `contracts`. It costs a little
+ * duplication, since the server re-derives summary counts `assembleRun` already computed,
+ * and it buys invariant I8 being structural rather than cultural.
+ */
+export const SERVER_FORBIDDEN_PATTERNS = [
+  '@specgate/core',
+  '@specgate/core/*',
+  '@specgate/cli',
+  '@specgate/cli/*',
+  '@specgate/action',
+  '@specgate/action/*',
+];
+
+export const SERVER_DIRECTION_MESSAGE =
+  'Rule R14: server imports nothing from core. The control plane must not be able to execute a check. Everything it needs about a run arrives as data validated against contracts.';
 
 export const CORE_DIRECTION_MESSAGE =
   'core imports nothing from cli or action. If core needs to tell the user something, it returns data.';
@@ -66,6 +95,10 @@ const llmGroup = { group: LLM_CLIENT_PATTERNS, message: LLM_BOUNDARY_MESSAGE };
 const coreDirectionGroup = { group: CORE_FORBIDDEN_PATTERNS, message: CORE_DIRECTION_MESSAGE };
 const cliDirectionGroup = { group: CLI_FORBIDDEN_PATTERNS, message: CLI_DIRECTION_MESSAGE };
 const checksBoundaryGroup = { group: CHECKS_FORBIDDEN_PATTERNS, message: CHECKS_BOUNDARY_MESSAGE };
+const serverDirectionGroup = {
+  group: SERVER_FORBIDDEN_PATTERNS,
+  message: SERVER_DIRECTION_MESSAGE,
+};
 
 /** @param {{ group: string[], message: string }[]} groups */
 function restrict(groups) {
@@ -125,6 +158,14 @@ export default tseslint.config(
     files: ['packages/cli/**/*.ts'],
     rules: {
       [LLM_BOUNDARY_RULE]: restrict([llmGroup, cliDirectionGroup]),
+    },
+  },
+  {
+    // Rule R14. The model boundary applies here as everywhere, and the control plane
+    // additionally may not reach the engine at all.
+    files: ['packages/server/**/*.ts'],
+    rules: {
+      [LLM_BOUNDARY_RULE]: restrict([llmGroup, serverDirectionGroup]),
     },
   },
 );
