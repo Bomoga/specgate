@@ -33,3 +33,14 @@ export {
   verifyRunnerToken,
 } from './identity/runner.ts';
 export type { RunnerCredential, RunnerRefusal, RunnerRegistration } from './identity/runner.ts';
+export { GITHUB_ISSUER, mapRepository, verifyGithubOidc } from './identity/github-oidc.ts';
+export type { JsonWebKey, OidcScope } from './identity/github-oidc.ts';
+export {
+  CredentialRefError,
+  REF_KINDS,
+  parseCredentialRef,
+  putActor,
+  recordResolution,
+  unresolvedActors,
+} from './identity/credentials.ts';
+export type { ActorHealth, ActorRecord, CredentialRef } from './identity/credentials.ts';
