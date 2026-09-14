@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Evidence, RunResult } from '../contracts/index.ts';
 import { DEFAULT_PRUNE_POLICY } from './prune.ts';
 import { openStore, type Store, type StoreOptions } from './store.ts';
+import { DEFAULT_EVIDENCE_DIR } from '../evidence/capture.ts';
+import { addressOf, resolveBodyPath } from '../evidence/address.ts';
 
 /**
  * Real files in a temp directory, because half of what pruning does is unlink a body the
@@ -66,6 +68,11 @@ function run(runId: string, startedAt: string): RunResult {
   } as RunResult;
 }
 
+/** A content address, per D51. Derived from a seed so a test can name one twice. */
+function addressFor(seed: string): string {
+  return addressOf(seed);
+}
+
 function evidence(id: string, bodyRef: string | undefined): Evidence {
   return {
     id,
@@ -82,7 +89,7 @@ function evidence(id: string, bodyRef: string | undefined): Evidence {
 
 /** Puts a body where the capture writer would have. */
 function writeBody(bodyRef: string): string {
-  const target = join(dir, bodyRef);
+  const target = resolveBodyPath(bodyRef, { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR });
   mkdirSync(join(target, '..'), { recursive: true });
   writeFileSync(target, '{"request":{},"response":{}}\n', 'utf8');
   return target;
@@ -101,7 +108,7 @@ function startedAt(index: number): string {
  */
 function fill(store: Store, count: number, withEvidence = true): void {
   for (let index = 0; index < count; index += 1) {
-    const bodyRef = `.specgate/evidence/EV-${index}.json`;
+    const bodyRef = addressFor(`EV-${index}`);
     if (withEvidence) writeBody(bodyRef);
     store.saveRun(
       run(`RUN-${index.toString().padStart(2, '0')}`, startedAt(index)),
@@ -185,7 +192,11 @@ describe('the retention window', () => {
       bodiesStillReferenced: [],
       runsRetained: 3,
     });
-    expect(existsSync(join(dir, '.specgate/evidence/EV-0.json'))).toBe(true);
+    expect(
+      existsSync(
+        resolveBodyPath(addressFor('EV-0'), { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR }),
+      ),
+    ).toBe(true);
   });
 
   it('reads recency the way listRuns does, not the order runs were written in', () => {
@@ -208,23 +219,38 @@ describe('body files', () => {
 
     const report = store.pruneEvidence({ keepRuns: 3, keepEvidence: 1 });
 
-    expect(report.bodiesDeleted).toStrictEqual([
-      '.specgate/evidence/EV-0.json',
-      '.specgate/evidence/EV-1.json',
-    ]);
-    expect(existsSync(join(dir, '.specgate/evidence/EV-0.json'))).toBe(false);
-    expect(existsSync(join(dir, '.specgate/evidence/EV-1.json'))).toBe(false);
+    // Sorted by content address rather than by identifier since D51, so this compares the
+    // set. Which two were deleted is the assertion; the order they come back in is not.
+    expect([...report.bodiesDeleted].sort()).toStrictEqual(
+      [addressFor('EV-0'), addressFor('EV-1')].sort(),
+    );
+    expect(
+      existsSync(
+        resolveBodyPath(addressFor('EV-0'), { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR }),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        resolveBodyPath(addressFor('EV-1'), { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR }),
+      ),
+    ).toBe(false);
     // The kept run's body is untouched, so this is retention rather than a clear out.
-    expect(existsSync(join(dir, '.specgate/evidence/EV-2.json'))).toBe(true);
+    expect(
+      existsSync(
+        resolveBodyPath(addressFor('EV-2'), { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR }),
+      ),
+    ).toBe(true);
   });
 
   it('leaves a body alone while any surviving evidence row still names it', () => {
-    // Evidence ids come from a per-run counter, so every run writes EV-000001.json and
-    // two runs genuinely point at one file. Deleting the older run's body would delete
-    // the newer run's evidence, which is the artifact behind a finding somebody is
+    // Two runs share a body when they captured the same bytes, which since D51 is a fact
+    // about the content rather than an accident. It used to be an accident: evidence ids
+    // come from a per run counter, so every run minted EV-000001 and two unrelated bodies
+    // collided on one filename. Either way the rule is the same and still matters, because
+    // deleting the older run's body would delete the artifact behind a finding somebody is
     // reading right now.
     const store = open();
-    const shared = '.specgate/evidence/EV-000001.json';
+    const shared = addressFor('EV-000001');
     writeBody(shared);
 
     store.saveRun(run('RUN-00', startedAt(0)), [evidence('EV-000001', shared)]);
@@ -235,14 +261,16 @@ describe('body files', () => {
     expect(report.evidenceRemoved.map((one) => one.runId)).toStrictEqual(['RUN-00']);
     expect(report.bodiesStillReferenced).toStrictEqual([shared]);
     expect(report.bodiesDeleted).toStrictEqual([]);
-    expect(existsSync(join(dir, shared))).toBe(true);
+    expect(
+      existsSync(resolveBodyPath(shared, { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR })),
+    ).toBe(true);
   });
 
   it('deletes a shared body once the last run naming it is pruned', () => {
     // The other half of the rule. A guard that never released the file would be
     // indistinguishable from one that worked, until the directory filled up.
     const store = open();
-    const shared = '.specgate/evidence/EV-000001.json';
+    const shared = addressFor('EV-000001');
     writeBody(shared);
 
     store.saveRun(run('RUN-00', startedAt(0)), [evidence('EV-000001', shared)]);
@@ -252,19 +280,21 @@ describe('body files', () => {
 
     expect(report.bodiesStillReferenced).toStrictEqual([]);
     expect(report.bodiesDeleted).toStrictEqual([shared]);
-    expect(existsSync(join(dir, shared))).toBe(false);
+    expect(
+      existsSync(resolveBodyPath(shared, { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR })),
+    ).toBe(false);
   });
 
   it('reports a recorded body that was never on disk rather than claiming a deletion', () => {
     // An absence is not a deletion, and a report that counted it as one would overstate
     // what pruning reclaimed.
     const store = open();
-    store.saveRun(run('RUN-00', startedAt(0)), [evidence('EV-0', '.specgate/evidence/EV-0.json')]);
+    store.saveRun(run('RUN-00', startedAt(0)), [evidence('EV-0', addressFor('EV-0'))]);
     store.saveRun(run('RUN-01', startedAt(1)), []);
 
     const report = store.pruneEvidence({ keepRuns: 2, keepEvidence: 1 });
 
-    expect(report.bodiesMissing).toStrictEqual(['.specgate/evidence/EV-0.json']);
+    expect(report.bodiesMissing).toStrictEqual([addressFor('EV-0')]);
     expect(report.bodiesDeleted).toStrictEqual([]);
   });
 
@@ -289,25 +319,25 @@ describe('pruning on write', () => {
     // run first, and the run window closes on it later.
     const store = open({ retention: { keepRuns: 2, keepEvidence: 1 } });
 
-    writeBody('.specgate/evidence/EV-0.json');
-    store.saveRun(run('RUN-00', startedAt(0)), [evidence('EV-0', '.specgate/evidence/EV-0.json')]);
+    writeBody(addressFor('EV-0'));
+    store.saveRun(run('RUN-00', startedAt(0)), [evidence('EV-0', addressFor('EV-0'))]);
 
-    writeBody('.specgate/evidence/EV-1.json');
+    writeBody(addressFor('EV-1'));
     const second = store.saveRun(run('RUN-01', startedAt(1)), [
-      evidence('EV-1', '.specgate/evidence/EV-1.json'),
+      evidence('EV-1', addressFor('EV-1')),
     ]);
 
     expect(second.pruned.runsRemoved).toStrictEqual([]);
     expect(second.pruned.evidenceRemoved.map((one) => one.runId)).toStrictEqual(['RUN-00']);
-    expect(second.pruned.bodiesDeleted).toStrictEqual(['.specgate/evidence/EV-0.json']);
+    expect(second.pruned.bodiesDeleted).toStrictEqual([addressFor('EV-0')]);
 
-    writeBody('.specgate/evidence/EV-2.json');
+    writeBody(addressFor('EV-2'));
     const third = store.saveRun(run('RUN-02', startedAt(2)), [
-      evidence('EV-2', '.specgate/evidence/EV-2.json'),
+      evidence('EV-2', addressFor('EV-2')),
     ]);
 
     expect(third.pruned.runsRemoved).toStrictEqual(['RUN-00']);
-    expect(third.pruned.bodiesDeleted).toStrictEqual(['.specgate/evidence/EV-1.json']);
+    expect(third.pruned.bodiesDeleted).toStrictEqual([addressFor('EV-1')]);
     expect(store.listRuns({ limit: 100 }).map((one) => one.runId)).toStrictEqual([
       'RUN-02',
       'RUN-01',
@@ -354,7 +384,11 @@ describe('the policy itself', () => {
     fill(store, 2);
 
     expect(store.listRuns({ limit: 100 })).toHaveLength(2);
-    expect(existsSync(join(dir, '.specgate/evidence/EV-1.json'))).toBe(false);
+    expect(
+      existsSync(
+        resolveBodyPath(addressFor('EV-1'), { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR }),
+      ),
+    ).toBe(false);
   });
 
   it('reports the window it applied, so a summary states it rather than implies it', () => {
@@ -374,9 +408,10 @@ describe('the policy itself', () => {
 
     expect(report.runsRemoved).toStrictEqual(['RUN-01', 'RUN-00']);
     expect(report.evidenceRemoved.map((one) => one.runId)).toStrictEqual(['RUN-00', 'RUN-01']);
-    expect(report.bodiesDeleted).toStrictEqual([
-      '.specgate/evidence/EV-0.json',
-      '.specgate/evidence/EV-1.json',
-    ]);
+    // Compared as a set, for the same reason as above: since D51 the candidate list sorts
+    // by content address, and which bodies went is the assertion rather than their order.
+    expect([...report.bodiesDeleted].sort()).toStrictEqual(
+      [addressFor('EV-0'), addressFor('EV-1')].sort(),
+    );
   });
 });

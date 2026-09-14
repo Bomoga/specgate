@@ -7,8 +7,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EvidenceSchema, SpecSchema } from '../contracts/index.ts';
 import { fixedDeps } from '../target/deps.ts';
 import type { RequestOutcome, RequestSpec } from '../target/request.ts';
-import { captureHttpEvidence, createEvidenceWriter } from './capture.ts';
+import { DEFAULT_EVIDENCE_DIR, captureHttpEvidence, createEvidenceWriter } from './capture.ts';
 import { rulesFor } from './redact.ts';
+import { addressOf, isBodyAddress, resolveBodyPath } from './address.ts';
 
 const SPEC = SpecSchema.parse({
   specVersion: '0.1',
@@ -151,8 +152,13 @@ describe('nothing sensitive reaches disk', () => {
   });
 
   it('still writes the fields that are not sensitive, so evidence stays useful', () => {
-    const id = writeOne();
-    const body = readFileSync(join(dir, '.specgate/evidence', `${id}.json`), 'utf8');
+    writeOne();
+    // Read by content address rather than by identifier, since D51 the body file is named
+    // for its hash and the identifier names only the record beside it.
+    const body = readdirSync(join(dir, '.specgate/evidence'))
+      .filter((name) => name.startsWith('sha256-'))
+      .map((name) => readFileSync(join(dir, '.specgate/evidence', name), 'utf8'))
+      .join('\n');
 
     expect(body).toContain('INV-1001');
     expect(body).toContain('org-1');
@@ -162,7 +168,11 @@ describe('nothing sensitive reaches disk', () => {
   it('leaves no other file behind that could hold the unredacted body', () => {
     writeOne();
     const names = readdirSync(join(dir, '.specgate/evidence')).sort();
-    expect(names).toEqual(['EV-000001.json', 'EV-000001.record.json']);
+    // Exactly two: the record, named for the evidence identifier, and the body, named for
+    // its content address. Anything else here is a file nobody redacted.
+    expect(names).toHaveLength(2);
+    expect(names.filter((name) => name === 'EV-000001.record.json')).toHaveLength(1);
+    expect(names.filter((name) => /^sha256-[0-9a-f]{64}\.json$/.test(name))).toHaveLength(1);
   });
 
   it('writes a record that still parses as Evidence', () => {
@@ -173,13 +183,52 @@ describe('nothing sensitive reaches disk', () => {
     expect(EvidenceSchema.safeParse(raw).success).toBe(true);
   });
 
-  it('points bodyRef at the file it wrote', () => {
+  it('addresses the body by its content, and the file it wrote is there', () => {
     const capture = captureHttpEvidence(REQUEST, RESPONSE, RULES, fixedDeps());
     createEvidenceWriter({ cwd: dir }).write(capture);
 
-    const bodyRef = capture.evidence.response?.bodyRef;
-    expect(bodyRef).toBe('.specgate/evidence/EV-000001.json');
-    expect(() => readFileSync(join(dir, bodyRef ?? ''), 'utf8')).not.toThrow();
+    const bodyRef = capture.evidence.response?.bodyRef ?? '';
+    // Per D51. The reference names no directory, no working directory, and no filesystem,
+    // which is what lets the same value address a body in object storage.
+    expect(isBodyAddress(bodyRef)).toBe(true);
+    expect(bodyRef).not.toContain('/');
+
+    const path = resolveBodyPath(bodyRef, { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR });
+    expect(() => readFileSync(path, 'utf8')).not.toThrow();
+  });
+
+  it('addresses the bytes it actually wrote, so the hash can be checked', () => {
+    // The address is a hash of exactly what lands on disk. If serialization and addressing
+    // ever disagreed, one document would have two addresses and deduplication would be a
+    // lie rather than a saving.
+    const capture = captureHttpEvidence(REQUEST, RESPONSE, RULES, fixedDeps());
+    createEvidenceWriter({ cwd: dir }).write(capture);
+
+    const bodyRef = capture.evidence.response?.bodyRef ?? '';
+    const written = readFileSync(
+      resolveBodyPath(bodyRef, { cwd: dir, evidenceDir: DEFAULT_EVIDENCE_DIR }),
+      'utf8',
+    );
+    expect(addressOf(written)).toBe(bodyRef);
+  });
+
+  it('gives two identical bodies one address, which is the point', () => {
+    // Two runs capturing the same bytes share a body. Under the old scheme they shared one
+    // by accident, because EV- is a per run counter and both runs minted EV-000001.
+    const first = captureHttpEvidence(REQUEST, RESPONSE, RULES, fixedDeps());
+    const second = captureHttpEvidence(REQUEST, RESPONSE, RULES, fixedDeps());
+    expect(second.evidence.id).toBe(first.evidence.id);
+    expect(second.evidence.response?.bodyRef).toBe(first.evidence.response?.bodyRef);
+
+    const different: RequestOutcome = {
+      kind: 'response',
+      response: {
+        ...RESPONSE.response,
+        body: JSON.stringify({ id: 'INV-2001', org_id: 'org-2', total_cents: 1, notes: 'x' }),
+      },
+    };
+    const other = captureHttpEvidence(REQUEST, different, RULES, fixedDeps());
+    expect(other.evidence.response?.bodyRef).not.toBe(first.evidence.response?.bodyRef);
   });
 });
 

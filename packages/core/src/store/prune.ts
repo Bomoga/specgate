@@ -1,6 +1,7 @@
 import { existsSync, unlinkSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
 
+import { DEFAULT_EVIDENCE_DIR } from '../evidence/capture.ts';
+import { isBodyAddress, resolveBodyPath } from '../evidence/address.ts';
 import type { StoreDatabase } from './schema.ts';
 
 /**
@@ -95,9 +96,17 @@ interface EvidenceRow {
   readonly body_path: string | null;
 }
 
-/** `.specgate/evidence/EV-1.json` is recorded relative to the project, not to the state directory. */
-function bodyFileFor(projectDir: string, bodyPath: string): string {
-  return isAbsolute(bodyPath) ? bodyPath : resolve(projectDir, bodyPath);
+/**
+ * Where a content address lands on disk, per D51.
+ *
+ * A reference that is not an address belongs to a run stored before P1.6 and cannot be
+ * resolved: the old form was a path into a directory layout this build no longer writes.
+ * Returning undefined makes it count as missing, which is already a case this function's
+ * caller handles, rather than throwing and taking retention down with it.
+ */
+function bodyFileFor(projectDir: string, bodyRef: string): string | undefined {
+  if (!isBodyAddress(bodyRef)) return undefined;
+  return resolveBodyPath(bodyRef, { cwd: projectDir, evidenceDir: DEFAULT_EVIDENCE_DIR });
 }
 
 /**
@@ -182,7 +191,7 @@ export function pruneStore(
     }
 
     const file = bodyFileFor(projectDir, path);
-    if (!existsSync(file)) {
+    if (file === undefined || !existsSync(file)) {
       bodiesMissing.push(path);
       continue;
     }
