@@ -100,3 +100,6 @@ jobs:
           # bypasses row level security outright and the image's configured user is one.
           DATABASE_URL: postgres://specgate:specgate@127.0.0.1:5433/specgate_test
           DATABASE_APP_URL: postgres://specgate_app:specgate_app@127.0.0.1:5433/specgate_test
+          # Local to this job. A deployment provisions its own and never reads one from a
+          # repository setting.
+          RUNNER_JWT_SECRET: local-ci-secret

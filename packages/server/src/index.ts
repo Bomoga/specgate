@@ -22,3 +22,14 @@ export {
 export type { Capability, Membership, Role } from './tenancy/roles.ts';
 export { TENANT_SETTING, closeDatabase, migrate, withTenant } from './tenancy/db.ts';
 export type { Principal, Sql, TenantContext, Tx } from './tenancy/db.ts';
+export {
+  RunnerAuthError,
+  hashSecret,
+  issueRunnerJwt,
+  registerRunner,
+  revokeRunner,
+  splitToken,
+  verifyRunnerJwt,
+  verifyRunnerToken,
+} from './identity/runner.ts';
+export type { RunnerCredential, RunnerRefusal, RunnerRegistration } from './identity/runner.ts';
